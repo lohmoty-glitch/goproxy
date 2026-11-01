@@ -1,14 +1,13 @@
-FROM golang:1.21-alpine AS builder
-
+# Используем официальный образ Rust для сборки
+FROM rust:1.70-slim as builder
 WORKDIR /app
 COPY . .
-RUN go get golang.org/x/net@v0.33.0 && go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux go build -o proxy
+# Собираем бинарный файл tunnix
+RUN cargo build --release
 
-FROM alpine:latest
-RUN apk --no-cache add ca-certificates
-WORKDIR /root/
-COPY --from=builder /app/proxy .
-
-EXPOSE 1080
-CMD ["./proxy"]
+# Финальный образ
+FROM debian:bookworm-slim
+# Копируем скомпилированный бинарник из предыдущего этапа
+COPY --from=builder /app/target/release/tunnix /usr/local/bin/tunnix
+# Запускаем сервер, используя переменную окружения $PORT, которую предоставляет Render
+CMD tunnix server --listen "0.0.0.0:$PORT" --password "$TUNNIX_PASSWORD"
