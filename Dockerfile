@@ -2,7 +2,7 @@ FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 COPY . .
-RUN go mod tidy
+RUN go get golang.org/x/net@v0.33.0 && go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build -o proxy
 
 FROM alpine:latest
