@@ -1,49 +1,323 @@
-# Go SOCKS5 Proxy
+# tunnix
 
-一个简单的基于Go的SOCKS5代理服务器，可以部署在Render上。
+An encrypted SOCKS5/HTTP proxy tunnel over HTTP/SSE.
 
-## 功能特点
+tunnix routes your SOCKS5 and HTTP(S) proxy traffic through a plain HTTP connection, end-to-end encrypted with ChaCha20-Poly1305. It is designed for environments that serve HTTP but block direct TCP — Cloud Shell, Codespaces, Gitpod, or any host behind a reverse proxy.
 
-- 支持SOCKS5协议
-- 可选的用户名/密码认证
-- Docker容器化
-- 易于部署到Render
+[![crates.io](https://img.shields.io/crates/v/tunnix.svg)](https://crates.io/crates/tunnix)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/aeroxy/tunnix)
 
-## 部署到Render
+## Features
 
-1. Fork这个仓库到你的GitHub账户
+- **End-to-end encryption** — ChaCha20-Poly1305, Argon2id key derivation
+- **HTTP/SSE transport** — no WebSocket required; works wherever plain HTTP works
+- **Dual-protocol listener** — SOCKS5 and HTTP proxy on the same port, auto-detected
+- **Connection multiplexing** — many connections share one SSE stream
+- **Custom header injection** — for cookie-authenticated reverse proxies
+- **Path prefix support** — serve under a sub-path (`/foo/bar/stream/...`) to coexist with other apps on the same host
+- **Remote exec (opt-in)** — `tunnix remote-exec` runs a command or interactive shell on the server over the tunnel; off by default, gated behind `--allow-exec` (Unix only)
+- **Single binary** — `tunnix server` / `tunnix client`
 
-2. 在Render.com创建一个新的Web Service，并连接到你的GitHub仓库
+## Installation
 
-3. 设置环境变量（可选）：
-   - `SOCKS5_USERNAME`: 代理认证用户名
-   - `SOCKS5_PASSWORD`: 代理认证密码
-   - `PORT`: 服务端口（Render会自动设置）
-
-4. 点击 "Create Web Service"
-
-## 本地运行
-
+**Homebrew (macOS / Linux):**
 ```bash
-# 构建Docker镜像
-docker build -t go-socks5-proxy .
-
-# 运行容器
-docker run -p 1080:1080 \
-  -e SOCKS5_USERNAME=your_username \
-  -e SOCKS5_PASSWORD=your_password \
-  go-socks5-proxy
+brew install aeroxy/tap/tunnix
 ```
 
-## 使用方法
+**Cargo:**
+```bash
+cargo install tunnix
+```
 
-设置你的SOCKS5客户端，连接到服务器：
-- 主机：你的Render应用URL
-- 端口：80/443（Render自动分配）
-- 如果设置了认证，需要提供用户名和密码
+Or download a pre-built binary from the [releases page](https://github.com/aeroxy/tunnix/releases).
 
-## 注意事项
+## Quick Start
 
-- Render免费版有一些限制，包括带宽和计算资源
-- 建议在生产环境中启用认证
-- 使用HTTPS以保护数据传输安全
+```bash
+# Server
+tunnix server --listen 0.0.0.0:8080 --password "your-secret"
+
+# Client
+tunnix client \
+  --server https://your-host.example.com \
+  --password "your-secret" \
+  --local-addr 127.0.0.1:7890
+
+# Test
+curl -x http://127.0.0.1:7890 https://ifconfig.me
+curl --socks5 127.0.0.1:7890 https://ifconfig.me
+```
+
+## Remote Exec (opt-in)
+
+`tunnix remote-exec` runs a command — or an interactive shell — on the server, over the same encrypted tunnel. It is **disabled by default** and Unix-only. The server must be started with `--allow-exec` (or `allow_exec = true` in config) to authorize it.
+
+```bash
+# Server — must explicitly opt in
+tunnix server --listen 0.0.0.0:8080 --password "your-secret" --allow-exec
+
+# Client — interactive shell
+tunnix remote-exec --server https://your-host.example.com --password "your-secret"
+
+# Client — one-off command
+tunnix remote-exec --server https://your-host.example.com --password "your-secret" -- ls -la /var/log
+```
+
+It allocates a PTY on the server, so interactive programs (`vim`, `top`, `bash`) work and your terminal size (`SIGWINCH`) is forwarded. The PTY runs in canonical mode — **do not pipe binary data through it** (line-buffering injects a trailing newline on EOF and drops control bytes); tunnel raw TCP for byte-exact transfers instead.
+
+> ⚠️ **`--allow-exec` grants remote code execution.** Anyone holding the server password gets a shell on the host. The server prints a loud warning at startup when it's enabled. Only turn it on when you understand and accept that.
+
+## File Transfer (opt-in)
+
+`tunnix push` and `tunnix pull` upload and download files or directories over the same encrypted tunnel. The stream is packed into a tar archive and **zstd-compressed** before it's encrypted by the transport (compress-then-encrypt). Transfers are **disabled by default**; the server must be started with `--allow-transfer` (or `allow_transfer = true` in config) to authorize them.
+
+```bash
+# Server — must explicitly opt in
+tunnix server --listen 0.0.0.0:8080 --password "your-secret" --allow-transfer
+
+# Upload a local file or directory to a destination directory on the server
+tunnix push --server https://your-host.example.com --password "your-secret" ./localdir /remote/dir
+
+# Download a remote file or directory into a local destination directory
+tunnix pull --server https://your-host.example.com --password "your-secret" /remote/dir ./localdir
+
+# Multiple sources in one transfer — last arg is the destination directory (like `cp`)
+tunnix push -s https://your-host.example.com -p "your-secret" a.txt b.txt ./somedir /remote/dir
+tunnix pull -s https://your-host.example.com -p "your-secret" /remote/a /remote/b ./localdir
+
+# Tune compression (zstd level 1-22; default 3)
+tunnix push -s https://your-host.example.com -p "your-secret" --level 19 ./bigdir /remote/dir
+```
+
+Directories transfer recursively with permissions preserved (like `scp -r`). You can pass several sources in one command — the **last argument is always the destination directory**, the rest are sources. Each source's basename becomes its archive root, so `push ./foo /remote` lands as `/remote/foo/...` (sources sharing a basename collide — the later one wins).
+
+> ⚠️ **`--allow-transfer` grants arbitrary file read/write.** Anyone holding the server password can read or overwrite files on the host. The server prints a loud warning at startup when it's enabled.
+
+## Deployment Scenarios
+
+### Google Cloud Shell
+
+Cloud Shell's Web Preview issues a temporary HTTPS URL for your HTTP server. tunnix runs inside Cloud Shell and the client connects using the preview URL with Cloud Shell's authorization cookies.
+
+**Server (inside Cloud Shell terminal):**
+```bash
+tunnix server --listen 0.0.0.0:8080 --password "your-secret"
+```
+Open Web Preview on port 8080 to get the preview URL.
+
+**Get cookies:** Browser DevTools → Network tab → any request to `*.cloudshell.dev` → copy the `Cookie` header.
+
+**Client (local machine):**
+```bash
+tunnix client \
+  --server "https://8080-cs-XXXX.cs-region.cloudshell.dev" \
+  --password "your-secret" \
+  --cookie "CloudShellAuthorization=Bearer ...; CloudShellPartitionedAuthorization=Bearer ..."
+```
+
+### GitHub Codespaces
+
+Codespaces exposes forwarded ports via a GitHub-authenticated HTTPS URL.
+
+**Server (inside Codespace terminal):**
+```bash
+tunnix server --listen 0.0.0.0:8080 --password "your-secret"
+```
+In the Ports panel, set port 8080 visibility to **Public** (or pass a GitHub token).
+
+**Client:**
+```bash
+tunnix client \
+  --server "https://your-codespace-name-8080.app.github.dev" \
+  --password "your-secret"
+```
+
+### Gitpod
+
+Same pattern as Codespaces. Make the port public in the Gitpod ports UI.
+
+**Client:**
+```bash
+tunnix client \
+  --server "https://8080-your-workspace.ws-eu.gitpod.io" \
+  --password "your-secret"
+```
+
+### Behind nginx (path prefix)
+
+When tunnix shares a host with other services, use `path_prefix` to scope all its routes under a sub-path. nginx handles TLS; tunnix binds to a local port.
+
+**`config.toml` (server):**
+```toml
+[server]
+listen = "127.0.0.1:9000"
+password = "your-secret"
+path_prefix = "/tunnix"
+```
+
+**nginx snippet:**
+```nginx
+location /tunnix/ {
+    proxy_pass http://127.0.0.1:9000;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_set_header Connection "";
+    proxy_set_header X-Accel-Buffering "no";
+    proxy_read_timeout 3600s;
+}
+```
+
+**Client:**
+```bash
+tunnix client --server "https://your-domain.com/tunnix" --password "your-secret"
+```
+
+> The bare `/health` endpoint always responds regardless of prefix, so load-balancer probes continue to work.
+
+### Railway / Render / Fly.io
+
+These platforms run long-lived processes and assign a public HTTPS URL. They set a `$PORT` environment variable.
+
+**Dockerfile (minimal):**
+```dockerfile
+FROM debian:bookworm-slim
+COPY tunnix /usr/local/bin/tunnix
+CMD tunnix server --listen "0.0.0.0:$PORT" --password "$TUNNIX_PASSWORD"
+```
+
+Set `TUNNIX_PASSWORD` as an environment secret in the platform dashboard.
+
+**Client:**
+```bash
+tunnix client \
+  --server "https://your-app.railway.app" \
+  --password "your-secret"
+```
+
+> **Vercel is not recommended.** Serverless functions have short execution timeouts (10–60 s depending on plan) that are incompatible with long-lived SSE streams. Use a container-based platform instead.
+
+## Configuration
+
+Copy `config.example.toml` to `config.toml` and customize:
+
+```toml
+[server]
+listen = "0.0.0.0:8080"
+password = "your-secret"
+# path_prefix = "/tunnix"   # optional; leave empty for root
+# allow_exec = false        # opt-in remote shell (RCE) for `tunnix remote-exec`; Unix only
+# allow_transfer = false    # opt-in file read/write for `tunnix push` / `tunnix pull`
+
+[client]
+server_url = "https://your-host.example.com"
+password = "your-secret"
+local_addr = "127.0.0.1:7890"
+# reconnect_interval = 3       # seconds to wait before reopening a failed stream
+# max_reconnect_attempts = 3   # consecutive no-data attempts before exiting; 0 = retry forever
+
+[client.headers]
+# Cookie = "..."   # only needed for cookie-authenticated hosts
+
+[logging]
+level = "info"
+# file = "./tunnix.log"
+```
+
+Run with a config file:
+```bash
+tunnix server --config config.toml
+tunnix client --config config.toml
+```
+
+### Config file resolution
+
+When `--config`/`-f` is not given, tunnix looks for a config file in this order and uses the first that exists:
+
+1. `--config <path>` / `-f <path>` — explicit path (must parse, or tunnix errors)
+2. `./config.toml` — in the current working directory
+3. `~/.config/tunnix/config.toml` — global per-user default (honors `$XDG_CONFIG_HOME`; same path on macOS and Linux)
+
+This applies to every subcommand, including `push` / `pull` and `remote-exec` — so you can keep your `server_url` and `password` in `~/.config/tunnix/config.toml` and run `tunnix push ./dir /remote/dir` from anywhere without flags. If none of the three exist, tunnix falls back to built-in defaults.
+
+CLI flags always override config file values. The password can also be supplied via the `TUNNIX_PASSWORD` environment variable.
+
+Changes to `config.toml` are picked up automatically every few seconds — no restart needed. Hot-reloadable fields: `password`, `headers`, `path_prefix`, `root_redirect`, `root_html`, `health_response`. Fields that require a restart: `listen`, `local_addr`, `server_url`, `logging.level`, `reconnect_interval`, `max_reconnect_attempts`. CLI overrides are never clobbered by file changes.
+
+### When the server goes away
+
+The client reopens the SSE stream on its own, waiting `reconnect_interval` seconds after a failed attempt - or a fixed 1s after a stream that ended cleanly, which usually just means the server dropped the session and a fresh GET will recreate it. After `max_reconnect_attempts` consecutive attempts that get no data from the server it logs the reason and exits non-zero, rather than retrying forever behind a proxy port that fails every connection - so a supervisor (systemd, launchd, a shell loop) can decide what to do about it. Any stream that does deliver data resets the count, so ordinary reconnects across a server restart never accumulate toward it. Set `max_reconnect_attempts = 0` to retry forever.
+
+Note the initial connection is not retried at all: if the server is unreachable when the client starts, the health check fails and it exits immediately.
+
+## Building
+
+```bash
+cargo build --release
+# Binary: target/release/tunnix
+```
+
+Cross-compile for Linux (requires [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)):
+```bash
+cargo zigbuild --release --target x86_64-unknown-linux-gnu
+```
+
+Or use `make`:
+```bash
+make release          # native
+make release-linux    # Linux x86_64
+make release-all      # both
+```
+
+## Architecture
+
+```
+Local SOCKS5/HTTP client
+        │
+        ▼
+  tunnix client
+  ├── proxy.rs       — TCP listener; detects protocol (0x05=SOCKS5, letter=HTTP)
+  ├── socks5.rs      — SOCKS5 handshake (RFC 1928, CONNECT only)
+  ├── http_proxy.rs  — HTTP CONNECT + plain HTTP forwarding
+  ├── relay.rs       — bidirectional relay; connection ID counter
+  ├── exec.rs        — remote-exec client: raw terminal + PTY stream (Unix)
+  └── tunnel.rs      — HTTP/SSE tunnel to server
+          │
+          │  POST /[prefix]/send/{session}    encrypted binary body
+          │  GET  /[prefix]/stream/{session}  SSE text/event-stream
+          ▼
+  tunnix server
+  └── server.rs      — hyper HTTP/1.1 server; session routing; prefix stripping
+          │
+          │  raw TCP
+          ▼
+  Target (e.g. api.example.com:443)
+```
+
+The client auto-detects the incoming protocol by peeking the first byte:
+- `0x05` → SOCKS5
+- ASCII letter → HTTP proxy (`CONNECT` for HTTPS, method for plain HTTP)
+
+## Security
+
+- Argon2id key derivation from the shared password
+- ChaCha20-Poly1305 AEAD, per-message random nonce
+- No plaintext payload logging
+- Use a strong, randomly generated password — it is the only credential
+- **Remote exec is off by default.** `--allow-exec` (server) grants a shell to anyone with the password — effectively full RCE on the host. Leave it disabled unless you explicitly need it.
+
+## Use with Clash / ClashX
+
+```yaml
+proxies:
+  - name: tunnix
+    type: socks5      # or type: http
+    server: 127.0.0.1
+    port: 7890
+```
+
+## License
+
+MIT

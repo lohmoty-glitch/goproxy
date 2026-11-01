@@ -1,0 +1,245 @@
+use serde::{Deserialize, Serialize};
+
+/// Message types exchanged between client and server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Message {
+    /// Client requests connection to target host
+    Connect {
+        conn_id: u32,
+        host: String,
+        port: u16,
+    },
+
+    /// Encrypted data payload
+    Data {
+        conn_id: u32,
+        data: Vec<u8>,
+    },
+
+    /// Close specific connection
+    Close {
+        conn_id: u32,
+    },
+
+    /// Keep-alive ping
+    Ping,
+
+    /// Keep-alive pong response
+    Pong,
+
+    /// Error response
+    Error {
+        conn_id: Option<u32>,
+        message: String,
+    },
+
+    /// Server tells client the session was freshly created (e.g. after a server
+    /// restart). Client must treat any existing conn_ids as orphaned and tear
+    /// them down — the server knows nothing about them.
+    Reset,
+
+    /// Client asks the server to open a PTY for this conn_id and run a command.
+    /// cmd = None => interactive login shell ($SHELL or /bin/sh); Some(s) => `sh -c s`.
+    /// cols/rows are the initial terminal size. The PTY's byte stream then flows
+    /// over the existing Data/Close messages, exactly like a TCP connection.
+    Exec {
+        conn_id: u32,
+        cmd: Option<String>,
+        cols: u16,
+        rows: u16,
+        /// Client's $TERM, so the remote PTY advertises the right terminal type
+        /// (falls back to xterm-256color client-side when unset).
+        term: String,
+    },
+
+    /// Client's terminal was resized; server applies the new size to the PTY.
+    Resize {
+        conn_id: u32,
+        cols: u16,
+        rows: u16,
+    },
+
+    /// Server reports the child process exit code (sent just before Close).
+    ExitStatus {
+        conn_id: u32,
+        code: i32,
+    },
+
+    /// Client asks to download `paths` (files or dirs) from the server. The
+    /// server streams them back as a single zstd-compressed tar archive over
+    /// Data messages, then ExitStatus + Close. `level` is the zstd level.
+    Pull {
+        conn_id: u32,
+        paths: Vec<String>,
+        level: i32,
+    },
+
+    /// Client announces an upload; `path` is the destination directory on the
+    /// server. The client then streams a zstd-compressed tar archive over Data
+    /// messages and a final Close. The server reports completion with
+    /// ExitStatus + Close (or Error on failure).
+    Push {
+        conn_id: u32,
+        path: String,
+    },
+
+    /// Client tells the server a connection is dead on its side: the proxied
+    /// app aborted, or the client's relay failed. Unlike `Close`, which only
+    /// half-closes the upload direction and leaves the target's output
+    /// flowing, this releases the target entirely - the server stops reading
+    /// it and drops the socket. Without it an abandoned download is pulled to
+    /// completion into a conn_id the client no longer knows.
+    ///
+    /// Appended last so existing variant indices are unchanged on the wire.
+    /// An older server fails to decode it and answers 200, so mixed versions
+    /// degrade to the previous behaviour rather than breaking.
+    Abort {
+        conn_id: u32,
+    },
+}
+
+impl Message {
+    /// Serialize message to bytes using bincode
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// Deserialize message from bytes
+    pub fn from_bytes(data: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_serialization() {
+        let msg = Message::Connect {
+            conn_id: 123,
+            host: "example.com".to_string(),
+            port: 443,
+        };
+
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+
+        match decoded {
+            Message::Connect { conn_id, host, port } => {
+                assert_eq!(conn_id, 123);
+                assert_eq!(host, "example.com");
+                assert_eq!(port, 443);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_abort_message() {
+        let bytes = Message::Abort { conn_id: 9 }.to_bytes().unwrap();
+        assert!(matches!(
+            Message::from_bytes(&bytes).unwrap(),
+            Message::Abort { conn_id: 9 }
+        ));
+    }
+
+    #[test]
+    fn test_data_message() {
+        let data = vec![1, 2, 3, 4, 5];
+        let msg = Message::Data {
+            conn_id: 456,
+            data: data.clone(),
+        };
+
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+
+        match decoded {
+            Message::Data { conn_id, data: decoded_data } => {
+                assert_eq!(conn_id, 456);
+                assert_eq!(decoded_data, data);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_reset_message() {
+        // Reset is a unit variant; make sure it round-trips and decodes back to
+        // Reset (not some other variant sharing a discriminant).
+        let bytes = Message::Reset.to_bytes().unwrap();
+        assert!(
+            matches!(Message::from_bytes(&bytes).unwrap(), Message::Reset),
+            "Reset did not round-trip"
+        );
+    }
+
+    #[test]
+    fn test_exec_messages() {
+        for msg in [
+            Message::Exec { conn_id: 7, cmd: Some("ls /home".into()), cols: 80, rows: 24, term: "xterm-256color".into() },
+            Message::Exec { conn_id: 8, cmd: None, cols: 120, rows: 40, term: "screen-256color".into() },
+            Message::Resize { conn_id: 7, cols: 100, rows: 30 },
+            Message::ExitStatus { conn_id: 7, code: 42 },
+        ] {
+            let bytes = msg.to_bytes().unwrap();
+            let decoded = Message::from_bytes(&bytes).unwrap();
+            match (msg, decoded) {
+                (
+                    Message::Exec { conn_id: a, cmd: c1, cols: cl1, rows: r1, term: t1 },
+                    Message::Exec { conn_id: b, cmd: c2, cols: cl2, rows: r2, term: t2 },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(c1, c2);
+                    assert_eq!((cl1, r1), (cl2, r2));
+                    assert_eq!(t1, t2);
+                }
+                (
+                    Message::Resize { conn_id: a, cols: cl1, rows: r1 },
+                    Message::Resize { conn_id: b, cols: cl2, rows: r2 },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!((cl1, r1), (cl2, r2));
+                }
+                (
+                    Message::ExitStatus { conn_id: a, code: c1 },
+                    Message::ExitStatus { conn_id: b, code: c2 },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(c1, c2);
+                }
+                _ => panic!("Wrong message type"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_transfer_messages() {
+        for msg in [
+            Message::Pull { conn_id: 9, paths: vec!["/etc/hosts".into(), "/tmp/x".into()], level: 3 },
+            Message::Push { conn_id: 10, path: "/tmp/dest".into() },
+        ] {
+            let bytes = msg.to_bytes().unwrap();
+            let decoded = Message::from_bytes(&bytes).unwrap();
+            match (msg, decoded) {
+                (
+                    Message::Pull { conn_id: a, paths: p1, level: l1 },
+                    Message::Pull { conn_id: b, paths: p2, level: l2 },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(p1, p2);
+                    assert_eq!(l1, l2);
+                }
+                (
+                    Message::Push { conn_id: a, path: p1 },
+                    Message::Push { conn_id: b, path: p2 },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(p1, p2);
+                }
+                _ => panic!("Wrong message type"),
+            }
+        }
+    }
+}

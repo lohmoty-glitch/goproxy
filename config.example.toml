@@ -1,0 +1,82 @@
+# tunnix Configuration Example
+# Copy this to config.toml and customize
+
+[server]
+# Address to listen on
+listen = "0.0.0.0:8080"
+
+# Shared password for encryption
+password = "change-this-to-a-strong-password"
+
+# Path prefix for all routes (useful when sharing a host via nginx or a reverse proxy).
+# The client's server_url must include this prefix.
+# Example: path_prefix = "/tunnix"
+#   Server routes become: /tunnix/stream/{id}  and  /tunnix/send/{id}
+#   Client server_url:    "https://your-host.com/tunnix"
+# path_prefix = ""
+
+# What to serve at GET / (and GET /{prefix}).
+# When neither root_redirect nor root_html is set, GET / returns the same body as GET /health.
+# Options (pick one):
+#   root_redirect = "https://github.com/aeroxy/tunnix"  # 301 redirect
+#   root_html     = "./index.html"                       # serve local HTML file
+
+# Response body for GET /health (and the default GET / fallback). Default: "ok"
+# health_response = "ok"
+
+# Maximum concurrent connections (optional)
+# max_connections = 1000
+
+# Connection timeout in seconds (optional)
+# timeout = 300
+
+# Allow `tunnix remote-exec` to open an interactive shell / run commands on THIS
+# machine. WARNING: this is remote code execution — anyone with the password can
+# run a shell here. Only enable on a box you control. Disabled by default.
+# Can also be enabled with the server flag --allow-exec.
+# allow_exec = false
+
+# Allow `tunnix push` / `tunnix pull` to read and write files on THIS machine.
+# WARNING: anyone with the password can read or overwrite arbitrary files here.
+# Only enable on a box you control. Disabled by default.
+# Can also be enabled with the server flag --allow-transfer.
+# allow_transfer = false
+
+[client]
+# Server URL. If the server uses a path_prefix, include it here.
+# Examples:
+#   Google Cloud Shell:  "https://XXXX.cs-region.cloudshell.dev"
+#   With path prefix:    "https://your-host.com/tunnix"
+server_url = "https://XXXX.cs-region.cloudshell.dev"
+
+# Shared password for encryption (must match server)
+password = "change-this-to-a-strong-password"
+
+# Local proxy address — accepts both SOCKS5 and HTTP proxy on the same port
+local_addr = "127.0.0.1:7890"
+
+# Seconds to wait before reopening the stream after a failure. Default: 3
+# reconnect_interval = 3
+
+# Consecutive reconnect attempts that may fail to get any data from the server
+# before the client gives up and exits. Any stream that does deliver data
+# resets the count, so this bounds an unbroken run of failures (server down,
+# wrong URL), not reconnects over the tunnel's lifetime. 0 = retry forever.
+# Default: 3
+# max_reconnect_attempts = 3
+
+# Expected response body from server /health. Connection fails if response doesn't match. Default: "ok"
+# health_expected = "ok"
+
+# Custom headers for the HTTP/SSE connection
+# Get cookie values from browser DevTools → Network tab → any request to the cloudshell.dev domain
+[client.headers]
+Cookie = "CloudShellAuthorization"
+User-Agent = "Chrome"
+
+[logging]
+# Log level: trace, debug, info, warn, error
+level = "info"
+
+# Optionally write logs to a file (in addition to stdout)
+# file = "./tunnix.log"
