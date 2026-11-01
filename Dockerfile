@@ -1,5 +1,5 @@
-# Используем официальный образ Rust для сборки
-FROM rust:1.85-slim as builder
+# Используем актуальный официальный образ Rust
+FROM rust:1.99-slim as builder
 WORKDIR /app
 COPY . .
 # Собираем бинарный файл tunnix
